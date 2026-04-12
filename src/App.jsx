@@ -3,6 +3,22 @@ import { sessions } from "./data";
 import "./App.css";
 import vistaLogo from "./assets/vista.svg";
 
+function buildAnswerTree(answers = []) {
+  const units = {};
+  for (const ans of answers) {
+    const uKey = ans.unitName;
+    const mKey = ans.moduleRoute;
+    if (!units[uKey]) units[uKey] = { unitName: ans.unitName, modules: {} };
+    if (!units[uKey].modules[mKey])
+      units[uKey].modules[mKey] = { moduleName: ans.moduleName, moduleRoute: ans.moduleRoute, answers: [] };
+    units[uKey].modules[mKey].answers.push(ans);
+  }
+  for (const u of Object.values(units))
+    for (const m of Object.values(u.modules))
+      m.answers.sort((a, b) => a.questionIndex - b.questionIndex);
+  return Object.values(units);
+}
+
 export default function App() {
   const [activeSession, setActiveSession] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -10,6 +26,9 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [activeIdx, setActiveIdx] = useState(null);
   const [tooltip, setTooltip] = useState({ visible: false, x: 0, idx: null });
+  const [rightTab, setRightTab] = useState("answers");
+  const [expandedUnits, setExpandedUnits] = useState({});
+  const [expandedModules, setExpandedModules] = useState({});
   const videoRef = useRef(null);
   const scrubberRef = useRef(null);
   const hoverTimer = useRef(null);
@@ -17,6 +36,18 @@ export default function App() {
 
   const session = sessions[activeSession];
   const events = session.events;
+  const answerTree = buildAnswerTree(session.answers);
+
+  useEffect(() => {
+    const eu = {};
+    const em = {};
+    for (const u of answerTree) {
+      eu[u.unitName] = true;
+      for (const m of Object.values(u.modules)) em[m.moduleRoute] = true;
+    }
+    setExpandedUnits(eu);
+    setExpandedModules(em);
+  }, [activeSession]);
 
   function formatRecordingDate(unixMs) {
     return new Date(Number(unixMs)).toLocaleString(undefined, {
@@ -84,13 +115,24 @@ export default function App() {
     return `${m}:${sec}`;
   }
 
+  function toggleUnit(unitName) {
+    setExpandedUnits(prev => ({ ...prev, [unitName]: !prev[unitName] }));
+  }
+  function toggleModule(moduleRoute) {
+    setExpandedModules(prev => ({ ...prev, [moduleRoute]: !prev[moduleRoute] }));
+  }
+
+  function isActiveAnswer(ans) {
+    return currentTime >= ans.navEnter && currentTime <= ans.navExit;
+  }
+
   const progress = duration ? (currentTime / duration) * 100 : 0;
 
   return (
     <div className="app">
       <header className="header">
         <div className="header-left">
-            <img src={vistaLogo} className="logo-img" alt="Vista" />
+          <img src={vistaLogo} className="logo-img" alt="Vista" />
           <div className="header-divider" />
           <span className="header-title">Participant View</span>
         </div>
@@ -155,7 +197,7 @@ export default function App() {
                 <div className="scrubber-bg" />
                 <div className="scrubber-fill" style={{ width: `${progress}%` }} />
                 <div className="scrubber-thumb" style={{ left: `${progress}%` }} />
-                {duration > 0 && events.map((ev, i) => {
+                {duration > 0 && rightTab === "nav" && events.map((ev, i) => {
                   const pct = (ev.t / duration) * 100;
                   return (
                     <div
@@ -168,7 +210,20 @@ export default function App() {
                     />
                   );
                 })}
-                {tooltip.visible && tooltip.idx !== null && (
+                {duration > 0 && rightTab === "answers" && (session.answers || []).map((ans, i) => {
+                  const pct = (ans.navEnter / duration) * 100;
+                  const correct = ans.selectedAnswerIndex === ans.correctAnswerIndex;
+                  const active = isActiveAnswer(ans);
+                  return (
+                    <div
+                      key={i}
+                      className={`marker marker-answer ${correct ? "marker-correct" : "marker-incorrect"} ${active ? "marker-active" : ""}`}
+                      style={{ left: `${pct}%` }}
+                      onClick={(e) => { e.stopPropagation(); jumpTo(ans.navEnter); }}
+                    />
+                  );
+                })}
+                {tooltip.visible && tooltip.idx !== null && rightTab === "nav" && (
                   <div className="marker-tooltip" style={{ left: `clamp(40px, ${tooltip.x}%, calc(100% - 40px))` }}>
                     {events[tooltip.idx].screenId}
                   </div>
@@ -180,33 +235,109 @@ export default function App() {
         </div>
 
         <div className="nav-panel">
-          <div className="panel-header">
-            <span className="panel-title">Navigation Events</span>
-            <span className="panel-meta">{events.length} events</span>
+          <div className="right-tabs">
+            <button
+              className={`right-tab ${rightTab === "answers" ? "right-tab-active" : ""}`}
+              onClick={() => setRightTab("answers")}
+            >
+              Answers
+              <span className="right-tab-count">{(session.answers || []).length}</span>
+            </button>
+            <button
+              className={`right-tab ${rightTab === "nav" ? "right-tab-active" : ""}`}
+              onClick={() => setRightTab("nav")}
+            >
+              Navigation
+              <span className="right-tab-count">{events.length}</span>
+            </button>
           </div>
-          <div className="nav-table">
-            <div className="nav-table-head">
-              <span>Screen</span>
-              <span>Time</span>
-              <span></span>
+
+          {rightTab === "nav" && (
+            <div className="nav-table">
+              <div className="nav-table-head">
+                <span>Screen</span>
+                <span>Time</span>
+                <span></span>
+              </div>
+              <div className="nav-table-body">
+                {events.map((ev, i) => (
+                  <div
+                    key={i}
+                    ref={el => listRefs.current[i] = el}
+                    className={`nav-row ${activeIdx === i ? "nav-row-active" : ""}`}
+                    onClick={() => jumpTo(ev.t)}
+                  >
+                    <span className="nav-screen">{ev.screenId}</span>
+                    <span className="nav-time">{formatTime(ev.t)}</span>
+                    <span className="nav-jump">
+                      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="nav-table-body">
-              {events.map((ev, i) => (
-                <div
-                  key={i}
-                  ref={el => listRefs.current[i] = el}
-                  className={`nav-row ${activeIdx === i ? "nav-row-active" : ""}`}
-                  onClick={() => jumpTo(ev.t)}
-                >
-                  <span className="nav-screen">{ev.screenId}</span>
-                  <span className="nav-time">{formatTime(ev.t)}</span>
-                  <span className="nav-jump">
-                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                  </span>
+          )}
+
+          {rightTab === "answers" && (
+            <div className="ans-tree">
+              {answerTree.length === 0 && (
+                <div className="ans-empty">No answer events recorded.</div>
+              )}
+              {answerTree.map(unit => (
+                <div key={unit.unitName} className="ans-unit">
+                  <div
+                    className="ans-unit-header"
+                    onClick={() => toggleUnit(unit.unitName)}
+                  >
+                    <span className={`ans-chevron ${expandedUnits[unit.unitName] ? "ans-chevron-open" : ""}`}>
+                      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+                    </span>
+                    <span className="ans-unit-name">{unit.unitName}</span>
+                    <span className="ans-count">
+                      {Object.values(unit.modules).reduce((s, m) => s + m.answers.length, 0)}
+                    </span>
+                  </div>
+
+                  {expandedUnits[unit.unitName] && Object.values(unit.modules).map(mod => (
+                    <div key={mod.moduleRoute} className="ans-module">
+                      <div
+                        className="ans-module-header"
+                        onClick={() => toggleModule(mod.moduleRoute)}
+                      >
+                        <span className={`ans-chevron ${expandedModules[mod.moduleRoute] ? "ans-chevron-open" : ""}`}>
+                          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+                        </span>
+                        <span className="ans-module-name">{mod.moduleName}</span>
+                        <span className="ans-count">{mod.answers.length}</span>
+                      </div>
+
+                      {expandedModules[mod.moduleRoute] && mod.answers.map(ans => {
+                        const correct = ans.selectedAnswerIndex === ans.correctAnswerIndex;
+                        const active = isActiveAnswer(ans);
+                        return (
+                          <div
+                            key={ans.id}
+                            className={`ans-row ${active ? "ans-row-active" : ""}`}
+                            onClick={() => jumpTo(ans.navEnter)}
+                          >
+                            <span className={`ans-result-dot ${correct ? "ans-correct" : "ans-incorrect"}`} title={correct ? "Correct" : "Incorrect"} />
+                            <span className="ans-q-label">Q{ans.questionIndex + 1}</span>
+                            <span className="ans-window">
+                              {formatTime(ans.navEnter)}–{formatTime(ans.navExit)}
+                            </span>
+                            {ans.secondAttempt && <span className="ans-badge">2nd</span>}
+                            <span className="nav-jump">
+                              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
                 </div>
               ))}
             </div>
-          </div>
+          )}
         </div>
       </div>
     </div>
